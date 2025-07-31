@@ -1,0 +1,94 @@
+name: Validate and Sort Telegram ID
+
+on:
+  pull_request:
+    paths:
+      - 'ids.json'
+      - '.github/trusted.yml'
+
+jobs:
+  validate-and-sort:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Validate JSON
+        run: |
+          python3 -m json.tool ids.json > /dev/null
+
+      - name: Check for non-numeric or duplicate IDs
+        run: |
+          ids=$(jq '.[]' ids.json)
+          unique=$(jq '.[]' ids.json | sort | uniq | wc -l)
+          total=$(jq '.[]' ids.json | wc -l)
+          if [ $unique -ne $total ]; then
+            echo "❌ Найдены дубликаты в ids.json"
+            exit 1
+          fi
+          for id in $ids; do
+            if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+              echo "❌ Недопустимый ID: $id"
+              exit 1
+            fi
+          done
+          echo "✅ Все ID корректны"
+
+      - name: Sort IDs
+        run: |
+          jq 'sort' ids.json > sorted.json && mv sorted.json ids.json
+
+      - name: Commit sorted ids.json
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add ids.json
+          git commit -m "🔄 Автосортировка ID" || echo "No changes to commit"
+          git push || echo "No permissions to push (из форка)"
+
+  auto-approve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Load trusted users
+        id: trusted
+        run: |
+          login=${{ github.event.pull_request.user.login }}
+          trusted=$(yq e '.trusted_users[]' .github/trusted.yml)
+          for t in $trusted; do
+            if [[ "$t" == "$login" ]]; then
+              echo "::set-output name=approved::true"
+              exit 0
+            fi
+          done
+          echo "::set-output name=approved::false"
+
+      - name: Auto-approve if trusted
+        if: steps.trusted.outputs.approved == 'true'
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+  auto-merge:
+    needs: [auto-approve]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load trusted users for merge
+        id: trusted
+        run: |
+          login=${{ github.event.pull_request.user.login }}
+          trusted=$(yq e '.trusted_users[]' .github/trusted.yml)
+          for t in $trusted; do
+            if [[ "$t" == "$login" ]]; then
+              echo "::set-output name=merge::true"
+              exit 0
+            fi
+          done
+          echo "::set-output name=merge::false"
+
+      - name: Merge PR if trusted
+        if: steps.trusted.outputs.merge == 'true'
+        uses: devops-infra/action-pull-request@v0.5.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          action: merge
